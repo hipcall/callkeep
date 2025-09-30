@@ -236,13 +236,15 @@ public class VoiceConnectionService extends ConnectionService {
         String extrasNumber = extras.getString(EXTRA_CALL_NUMBER);
         String displayName = extras.getString(EXTRA_CALLER_NAME);
         Log.d(TAG, "makeOngoingCall: " + extrasUuid + ", number: " + extrasNumber + ", displayName:" + displayName);
+        Log.d(TAG, "makeOngoingCall: isAvailable=" + isAvailable + ", isReachable=" + isReachable + ", isInitialized=" + isInitialized);
+        
         // TODO: Hold all other calls
         HashMap<String, Object> connectionData = this.bundleToMap(extras);
         VoiceConnection connection = new VoiceConnection(this, connectionData);
         initConnection(extrasUuid, connection, extras, request.getAccountHandle());
         startForegroundService();
         sendCallRequestToActivity(ACTION_ONGOING_CALL, connectionData);
-        Log.d(TAG, "makeOngoingCall: calling");
+        Log.d(TAG, "makeOngoingCall: call created and activity notified");
         return connection;
     }
 
@@ -268,9 +270,20 @@ public class VoiceConnectionService extends ConnectionService {
             Log.d(TAG, "makeOngoingCall: Waking up application");
             this.wakeUpApplication(callExtras);
         }
+        
+        // For outgoing calls from native UI, we should allow the call even if not explicitly available
+        // The application will be woken up and can handle the call
         if (this.canMakeOutgoingCall() && isReachable) {
+            Log.d(TAG, "makeOngoingCall: available and reachable");
             return true;
         }
+        
+        // If not available but we're handling an outgoing call, give it a chance
+        if (VoiceConnectionService.hasOutgoingCall) {
+            Log.d(TAG, "makeOngoingCall: allowing outgoing call from native UI");
+            return true;
+        }
+        
         Log.d(TAG, "makeOngoingCall: not available");
         return false;
     }
@@ -324,7 +337,13 @@ public class VoiceConnectionService extends ConnectionService {
         if (!foregroundSettings.isNull("notificationId")) {
             notificationId = foregroundSettings.getInt("notificationId");
         }
-        startForeground(notificationId, notification);
+        
+        // For Android 14+ (API 34+), we need to specify the service type
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+        } else {
+            startForeground(notificationId, notification);
+        }
     }
 
     @RequiresApi(api = Build.VERSION_CODES.N)

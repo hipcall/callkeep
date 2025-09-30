@@ -113,6 +113,11 @@ public class CallKeepModule {
                 result.success(null);
             }
             break;
+            case "registerPhoneAccount": {
+                registerPhoneAccountImpl();
+                result.success(null);
+            }
+            break;
             case "displayIncomingCall": {
                 displayIncomingCallImpl(
                         call.argument("uuid"),
@@ -693,6 +698,23 @@ public class CallKeepModule {
         Log.d(TAG, "Registered phone account " + account);
     }
 
+    private void registerPhoneAccountImpl() {
+        Context context = getAppContext();
+        if (context == null) {
+            Log.w(TAG, "registerPhoneAccountImpl: context is null");
+            return;
+        }
+        
+        ConstraintsMap currentSettings = getSettings(context);
+        if (currentSettings == null) {
+            Log.w(TAG, "registerPhoneAccountImpl: settings is null");
+            return;
+        }
+        
+        registerPhoneAccount(context, currentSettings);
+        Log.d(TAG, "registerPhoneAccountImpl: Phone account registration requested");
+    }
+
     private static void ensureTelecomManagerInitialize(Context context) {
         if (telecomManager == null) {
             ComponentName cName = new ComponentName(context, VoiceConnectionService.class);
@@ -907,7 +929,8 @@ public class CallKeepModule {
                     sendEventToFlutter("CallKeepDidPerformDTMFAction", args);
                     break;
                 case ACTION_AUDIO_CALL:
-                    args.putString("route", (String) attributeMap.get("audioRoute"));
+                    args.putInt("audioRoute", (Integer) attributeMap.get("audioRoute"));
+                    args.putString("audioRouteName", (String) attributeMap.get("audioRouteName"));
                     args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
                     sendEventToFlutter("CallKeepDidChangeAudioAction", args);
                     break;

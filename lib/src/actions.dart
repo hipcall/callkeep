@@ -34,9 +34,11 @@ class CallKeepPerformRejectCallAction extends EventType {
 class CallKeepDidChangeAudioAction extends EventType {
   CallKeepDidChangeAudioAction.fromMap(Map<dynamic, dynamic> arguments)
       : callUUID = arguments['callUUID'],
-        audioRoute = arguments['audioRoute'];
+        audioRoute = arguments['audioRoute'],
+        audioRouteName = arguments['audioRouteName'];
   final String? callUUID;
   final int? audioRoute;
+  final String? audioRouteName;
 }
 
 class CallKeepDidReceiveFailedCallAction extends EventType {

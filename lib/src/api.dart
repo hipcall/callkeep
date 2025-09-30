@@ -103,6 +103,7 @@ class FlutterCallkeep extends EventManager {
     String callerName = '',
     String handleType = 'number',
     bool hasVideo = false,
+    String stage = 'init',
     Map<String, dynamic> additionalData = const {},
   }) async {
     await _channel.invokeMethod<void>('displayIncomingCall', <String, dynamic>{
@@ -111,6 +112,7 @@ class FlutterCallkeep extends EventManager {
       'handleType': handleType,
       'hasVideo': hasVideo,
       'callerName': callerName,
+      'stage': stage,
       'additionalData': additionalData
     });
   }
@@ -468,6 +470,9 @@ class FlutterCallkeep extends EventManager {
         break;
       case 'CallKeepPushKitToken':
         emit(CallKeepPushKitToken.fromMap(data));
+        break;
+      case 'CallKeepDidChangeAudioAction':
+        emit(CallKeepDidChangeAudioAction.fromMap(data));
         break;
     }
   }

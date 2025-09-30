@@ -249,6 +249,7 @@ static NSObject<CallKeepPushDelegate>* _delegate;
     NSString *callerName = dic[@"caller_name"];
     BOOL hasVideo = [dic[@"has_video"] boolValue];
     NSString *callerIdType = dic[@"caller_id_type"];
+    NSString *stage = dic[@"stage"];
     
     
     if( uuid == nil) {
@@ -257,6 +258,18 @@ static NSObject<CallKeepPushDelegate>* _delegate;
     
     NSLog(@"Got here %@.", [dic description]);
     
+    // Handle call cancellation
+    if (stage && [stage isEqualToString:@"cancel"]) {
+        NSLog(@"[CallKeep] Call cancelled via push notification for UUID: %@", uuid);
+        // End the call if it exists
+        [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
+        if(completion != nil) {
+            completion();
+        }
+        return;
+    }
+    
+    // Handle call initialization (default behavior)
     [CallKeep reportNewIncomingCall:uuid
                              handle:callerId
                          handleType:callerIdType
