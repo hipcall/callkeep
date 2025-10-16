@@ -250,16 +250,26 @@ static NSObject<CallKeepPushDelegate>* _delegate;
     BOOL hasVideo = [dic[@"has_video"] boolValue];
     NSString *callerIdType = dic[@"caller_id_type"];
     NSString *stage = dic[@"stage"];
-    
-    
+
+    // Handle end_call as either boolean or integer (1/0)
+    BOOL endCall = NO;
+    id endCallValue = dic[@"end_call"];
+    if ([endCallValue isKindOfClass:[NSNumber class]]) {
+        endCall = [endCallValue boolValue];
+    } else if ([endCallValue isKindOfClass:[NSString class]]) {
+        endCall = [endCallValue boolValue] || [endCallValue isEqualToString:@"true"] || [endCallValue isEqualToString:@"1"];
+    }
+
     if( uuid == nil) {
         uuid = [self createUUID];
     }
-    
-    NSLog(@"Got here %@.", [dic description]);
-    
-    // Handle call cancellation
-    if (stage && [stage isEqualToString:@"cancel"]) {
+
+    NSLog(@"[CallKeep][VoIP Push] Payload: %@", [dic description]);
+    NSLog(@"[CallKeep][VoIP Push] end_call raw value: %@ (type: %@), evaluated as BOOL: %d", endCallValue, [endCallValue class], endCall);
+    NSLog(@"[CallKeep][VoIP Push] stage: %@", stage);
+
+    // Handle call cancellation - support both "end_call" and "stage" formats
+    if (endCall || (stage && [stage isEqualToString:@"cancel"])) {
         NSLog(@"[CallKeep] Call cancelled via push notification for UUID: %@", uuid);
         // End the call if it exists
         [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
