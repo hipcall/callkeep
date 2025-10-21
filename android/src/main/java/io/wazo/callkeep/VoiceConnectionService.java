@@ -282,8 +282,6 @@ public class VoiceConnectionService extends ConnectionService {
     }
 
     private boolean wakeAndCheckAvailability(Bundle callExtras, Boolean forceWakeUp) {
-        boolean isRunning = VoiceConnectionService.isRunning(this.getApplicationContext());
-
         // Check if already available
         if (this.canMakeOutgoingCall() && Boolean.TRUE.equals(isReachable)) {
             Log.d(TAG, "wakeAndCheckAvailability: already available and reachable");
@@ -291,7 +289,12 @@ public class VoiceConnectionService extends ConnectionService {
         }
 
         // Wakeup application if needed
-        if (!isRunning || forceWakeUp || !this.canMakeOutgoingCall()) {
+        // Note: Removed unreliable isRunning() check (deprecated getRunningTasks API)
+        // Instead, we rely on:
+        // 1. canMakeOutgoingCall() - accurate availability flag set by app
+        // 2. CountDownLatch - proper synchronization mechanism
+        // 3. Always wake if not available - safer than relying on deprecated API
+        if (forceWakeUp || !this.canMakeOutgoingCall()) {
             Log.d(TAG, "wakeAndCheckAvailability: waking up application");
 
             // Create a new latch to wait for availability signal
@@ -429,14 +432,15 @@ public class VoiceConnectionService extends ConnectionService {
     }
 
     private void checkReachability(ConnectionRequest request) {
-        Log.d(TAG, "checkReachability");
+        Log.d(TAG, "checkReachability: sending reachability check broadcast");
         checkReachability();
-        new Handler().postDelayed(
-                () -> {
-                    Log.d(TAG, "checkReachability timeout, force wakeup");
-                    wakeUpApplication(request.getExtras());
-                },
-                2000);
+
+        // Removed fixed 2-second delay - wakeAndCheckAvailability() handles waiting properly
+        // The CountDownLatch mechanism in wakeAndCheckAvailability() provides:
+        // 1. Immediate response when app signals availability (no unnecessary delay)
+        // 2. 2-second timeout only if app doesn't respond
+        // 3. Better UX - no forced waiting when app is already available
+        Log.d(TAG, "checkReachability: wakeup will be handled by wakeAndCheckAvailability()");
     }
 
     private void checkReachability() {
@@ -563,20 +567,50 @@ public class VoiceConnectionService extends ConnectionService {
     }
 
     /**
-     * https://stackoverflow.com/questions/5446565/android-how-do-i-check-if-activity-is-running
+     * @deprecated This method uses the deprecated getRunningTasks() API which is unreliable
+     * on modern Android versions (Android 5.0+). On Android 10+ (API 29+), it may return
+     * an empty list even for the app's own tasks, causing false negatives.
+     *
+     * Do NOT use this method for critical app state detection.
+     * Instead, rely on proper availability flags (isAvailable, isReachable) that are
+     * explicitly set by the app, combined with CountDownLatch synchronization.
+     *
+     * Kept for backward compatibility only.
      *
      * @param context Context
-     * @return boolean
+     * @return boolean - UNRELIABLE on Android 10+
      */
+    @Deprecated
     public static boolean isRunning(Context context) {
-        ActivityManager activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-        List<RunningTaskInfo> tasks = activityManager.getRunningTasks(Integer.MAX_VALUE);
+        // WARNING: This API is deprecated and unreliable
+        // getRunningTasks() has been deprecated since Android 5.0 (API 21)
+        // On Android 10+ (API 29+), may return empty list even for own app
+        Log.w(TAG, "isRunning() called - this method is deprecated and unreliable on modern Android");
 
-        for (RunningTaskInfo task : tasks) {
-            if (context.getPackageName().equalsIgnoreCase(task.baseActivity.getPackageName()))
-                return true;
+        try {
+            ActivityManager activityManager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager == null) {
+                Log.e(TAG, "isRunning: ActivityManager is null");
+                return false;
+            }
+
+            List<RunningTaskInfo> tasks = activityManager.getRunningTasks(Integer.MAX_VALUE);
+            if (tasks == null || tasks.isEmpty()) {
+                Log.w(TAG, "isRunning: getRunningTasks returned null or empty list");
+                return false;
+            }
+
+            for (RunningTaskInfo task : tasks) {
+                if (task.baseActivity != null &&
+                    context.getPackageName().equalsIgnoreCase(task.baseActivity.getPackageName())) {
+                    return true;
+                }
+            }
+
+            return false;
+        } catch (Exception e) {
+            Log.e(TAG, "isRunning: Exception checking running state", e);
+            return false;
         }
-
-        return false;
     }
 }
