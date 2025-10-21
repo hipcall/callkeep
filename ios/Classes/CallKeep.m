@@ -218,8 +218,11 @@ static NSObject<CallKeepPushDelegate>* _delegate;
 
 
 - (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(PKPushType)type withCompletionHandler:(nonnull void (^)(void))completion {
-    // Process the received push
-    NSLog(@"didReceiveIncomingPushWithPayload payload = %@", payload.type);
+    // CRITICAL: Track timing to ensure we report call within 1 second (Apple requirement)
+    NSDate *pushReceivedTime = [NSDate date];
+    NSLog(@"[CallKeep][VoIP Push] ⏱️  Push received at: %@", pushReceivedTime);
+    NSLog(@"[CallKeep][VoIP Push] Payload type: %@", payload.type);
+
     /* payload example.
      {
      "uuid": "xxxxx-xxxxx-xxxxx-xxxxx",
@@ -229,7 +232,7 @@ static NSObject<CallKeepPushDelegate>* _delegate;
      "has_video": false,
      }
      */
-    
+
     NSDictionary *dic = payload.dictionaryPayload;
     
     if (_delegate) {
@@ -237,13 +240,13 @@ static NSObject<CallKeepPushDelegate>* _delegate;
     }
     
     if (!dic || dic[@"aps"] != nil) {
-        NSLog(@"Do not use the 'alert' format for push type %@.", payload.type);
+        NSLog(@"[CallKeep][VoIP Push] ❌ Invalid payload format (contains 'aps'). Do not use alert format for VoIP push type %@.", payload.type);
         if(completion != nil) {
             completion();
         }
         return;
     }
-    
+
     NSString *uuid = dic[@"uuid"];
     NSString *callerId = dic[@"caller_id"];
     NSString *callerName = dic[@"caller_name"];
@@ -262,15 +265,25 @@ static NSObject<CallKeepPushDelegate>* _delegate;
 
     if( uuid == nil) {
         uuid = [self createUUID];
+        NSLog(@"[CallKeep][VoIP Push] ⚠️  No UUID in payload, generated: %@", uuid);
     }
 
-    NSLog(@"[CallKeep][VoIP Push] Payload: %@", [dic description]);
+    NSLog(@"[CallKeep][VoIP Push] 📦 Payload: %@", [dic description]);
     NSLog(@"[CallKeep][VoIP Push] end_call raw value: %@ (type: %@), evaluated as BOOL: %d", endCallValue, [endCallValue class], endCall);
     NSLog(@"[CallKeep][VoIP Push] stage: %@", stage);
 
+    // CRITICAL: Measure time before reporting call to CallKit
+    NSDate *beforeReportTime = [NSDate date];
+    NSTimeInterval delayBeforeReport = [beforeReportTime timeIntervalSinceDate:pushReceivedTime];
+    NSLog(@"[CallKeep][VoIP Push] ⏱️  Time elapsed before reportNewIncomingCall: %.3f seconds", delayBeforeReport);
+
+    if (delayBeforeReport > 0.5) {
+        NSLog(@"[CallKeep][VoIP Push] ⚠️  WARNING: Already spent %.3f seconds processing! May exceed 1s limit!", delayBeforeReport);
+    }
+
     // Handle call cancellation - support both "end_call" and "stage" formats
     if (endCall || (stage && [stage isEqualToString:@"cancel"])) {
-        NSLog(@"[CallKeep] Call cancelled via push notification for UUID: %@", uuid);
+        NSLog(@"[CallKeep][VoIP Push] 🔚 Call cancelled via push notification for UUID: %@", uuid);
         // End the call if it exists
         [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
         if(completion != nil) {
@@ -278,8 +291,10 @@ static NSObject<CallKeepPushDelegate>* _delegate;
         }
         return;
     }
-    
+
     // Handle call initialization (default behavior)
+    // CRITICAL: This MUST be called within 1 second of receiving the push or iOS kills the app
+    NSLog(@"[CallKeep][VoIP Push] 📞 Reporting new incoming call to CallKit for UUID: %@", uuid);
     [CallKeep reportNewIncomingCall:uuid
                              handle:callerId
                          handleType:callerIdType
@@ -287,7 +302,24 @@ static NSObject<CallKeepPushDelegate>* _delegate;
                          callerName:callerName
                         fromPushKit:YES
                             payload:dic
-              withCompletionHandler:completion];
+              withCompletionHandler:^{
+                  // Measure total time from push received to call reported
+                  NSDate *callReportedTime = [NSDate date];
+                  NSTimeInterval totalDelay = [callReportedTime timeIntervalSinceDate:pushReceivedTime];
+                  NSLog(@"[CallKeep][VoIP Push] ⏱️  ✅ Total time to report call to CallKit: %.3f seconds", totalDelay);
+
+                  if (totalDelay > 1.0) {
+                      NSLog(@"[CallKeep][VoIP Push] ⚠️  ❌ CRITICAL: Exceeded 1 second limit (%.3f s)! iOS may terminate app!", totalDelay);
+                  } else if (totalDelay > 0.8) {
+                      NSLog(@"[CallKeep][VoIP Push] ⚠️  WARNING: Close to 1 second limit (%.3f s)", totalDelay);
+                  } else {
+                      NSLog(@"[CallKeep][VoIP Push] ✅ Within safe timing limits (%.3f s)", totalDelay);
+                  }
+
+                  if (completion != nil) {
+                      completion();
+                  }
+              }];
 }
 
 - (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(NSString *)type {

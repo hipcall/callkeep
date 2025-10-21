@@ -66,19 +66,27 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.wazo.callkeep.utils.ConstraintsMap;
 
 // @see https://github.com/kbagchiGWC/voice-quickstart-android/blob/9a2aff7fbe0d0a5ae9457b48e9ad408740dfb968/exampleConnectionService/src/main/java/com/twilio/voice/examples/connectionservice/VoiceConnectionService.java
 public class VoiceConnectionService extends ConnectionService {
-    private static Boolean isAvailable;
-    private static Boolean isInitialized;
-    private static Boolean isReachable;
-    private static PhoneAccountHandle phoneAccountHandle = null;
+    // Thread-safe: volatile ensures visibility across threads
+    private static volatile Boolean isAvailable;
+    private static volatile Boolean isInitialized;
+    private static volatile Boolean isReachable;
+    private static volatile PhoneAccountHandle phoneAccountHandle = null;
     private static final String TAG = "RNCK:VoiceConnectionService";
-    private static final Map<String, VoiceConnection> currentConnections = new HashMap<>();
-    public static Boolean hasOutgoingCall = false;
-    public static VoiceConnectionService currentConnectionService = null;
+    // Thread-safe: ConcurrentHashMap prevents concurrent modification exceptions
+    private static final Map<String, VoiceConnection> currentConnections = new ConcurrentHashMap<>();
+    public static volatile Boolean hasOutgoingCall = false;
+    public static volatile VoiceConnectionService currentConnectionService = null;
+    // Thread-safe: AtomicReference prevents latch race conditions
+    private static final AtomicReference<CountDownLatch> availabilityLatch = new AtomicReference<>(null);
 
     public static VoiceConnection getConnection(String connectionId) {
         if (currentConnections.containsKey(connectionId)) {
@@ -137,6 +145,16 @@ public class VoiceConnectionService extends ConnectionService {
         }
 
         isAvailable = value;
+
+        // Signal any waiting threads that app is now available
+        // Capture latch locally to avoid race conditions
+        if (value) {
+            CountDownLatch latch = availabilityLatch.get();
+            if (latch != null) {
+                Log.d(TAG, "setAvailable: signaling availability latch");
+                latch.countDown();
+            }
+        }
     }
 
 
@@ -265,26 +283,62 @@ public class VoiceConnectionService extends ConnectionService {
 
     private boolean wakeAndCheckAvailability(Bundle callExtras, Boolean forceWakeUp) {
         boolean isRunning = VoiceConnectionService.isRunning(this.getApplicationContext());
+
+        // Check if already available
+        if (this.canMakeOutgoingCall() && Boolean.TRUE.equals(isReachable)) {
+            Log.d(TAG, "wakeAndCheckAvailability: already available and reachable");
+            return true;
+        }
+
         // Wakeup application if needed
-        if (!isRunning || forceWakeUp) {
-            Log.d(TAG, "makeOngoingCall: Waking up application");
+        if (!isRunning || forceWakeUp || !this.canMakeOutgoingCall()) {
+            Log.d(TAG, "wakeAndCheckAvailability: waking up application");
+
+            // Create a new latch to wait for availability signal
+            // Use compareAndSet to avoid race conditions with multiple wake attempts
+            CountDownLatch newLatch = new CountDownLatch(1);
+            if (!availabilityLatch.compareAndSet(null, newLatch)) {
+                // Another thread already created a latch, use that one
+                Log.d(TAG, "wakeAndCheckAvailability: using existing latch from concurrent wake attempt");
+                newLatch = availabilityLatch.get();
+            }
+
             this.wakeUpApplication(callExtras);
+
+            try {
+                // Wait up to 2 seconds for the app to become available
+                // Reduced from 5s to avoid blocking ConnectionService thread too long
+                Log.d(TAG, "wakeAndCheckAvailability: waiting for app to become available...");
+                boolean signaled = newLatch != null && newLatch.await(2, TimeUnit.SECONDS);
+
+                if (signaled) {
+                    Log.d(TAG, "wakeAndCheckAvailability: app signaled availability");
+                } else {
+                    Log.w(TAG, "wakeAndCheckAvailability: timeout waiting for app availability");
+                }
+            } catch (InterruptedException e) {
+                Log.e(TAG, "wakeAndCheckAvailability: interrupted while waiting", e);
+                Thread.currentThread().interrupt();
+            } finally {
+                // Clean up the latch - use compareAndSet to only clear if it's our latch
+                availabilityLatch.compareAndSet(newLatch, null);
+            }
         }
-        
-        // For outgoing calls from native UI, we should allow the call even if not explicitly available
-        // The application will be woken up and can handle the call
-        if (this.canMakeOutgoingCall() && isReachable) {
-            Log.d(TAG, "makeOngoingCall: available and reachable");
+
+        // Check availability after waiting
+        if (this.canMakeOutgoingCall() && Boolean.TRUE.equals(isReachable)) {
+            Log.d(TAG, "wakeAndCheckAvailability: available and reachable after wakeup");
             return true;
         }
-        
+
         // If not available but we're handling an outgoing call, give it a chance
-        if (VoiceConnectionService.hasOutgoingCall) {
-            Log.d(TAG, "makeOngoingCall: allowing outgoing call from native UI");
+        // This is a fallback for edge cases
+        if (Boolean.TRUE.equals(VoiceConnectionService.hasOutgoingCall)) {
+            Log.d(TAG, "wakeAndCheckAvailability: allowing outgoing call as fallback");
             return true;
         }
-        
-        Log.d(TAG, "makeOngoingCall: not available");
+
+        Log.d(TAG, "wakeAndCheckAvailability: not available after wakeup attempt");
         return false;
     }
 
@@ -390,8 +444,9 @@ public class VoiceConnectionService extends ConnectionService {
         broadcastAction(ACTION_CHECK_REACHABILITY, null);
     }
 
-    private Boolean canMakeOutgoingCall() {
-        return isAvailable;
+    private boolean canMakeOutgoingCall() {
+        // Use Boolean.TRUE.equals() to avoid NPE if isAvailable is ever null
+        return Boolean.TRUE.equals(isAvailable);
     }
 
     private void initConnection(String uuid, VoiceConnection connection, Bundle extras, PhoneAccountHandle accountHandle) {
