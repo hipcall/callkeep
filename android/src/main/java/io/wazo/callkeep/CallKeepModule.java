@@ -863,18 +863,41 @@ public class CallKeepModule {
     private class VoiceBroadcastReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
+            // Defensive programming: validate intent and action
+            if (intent == null) {
+                Log.w(TAG, "VoiceBroadcastReceiver: received null intent");
+                return;
+            }
+
+            String action = intent.getAction();
+            if (action == null) {
+                Log.w(TAG, "VoiceBroadcastReceiver: received intent with null action");
+                return;
+            }
+
             ConstraintsMap args = new ConstraintsMap();
             Map<String, Object> attributeMap = (Map<String, Object>) intent.getSerializableExtra(EXTRA_CALL_ATTRIB);
 
-            switch (Objects.requireNonNull(intent.getAction())) {
-                case ACTION_END_CALL:
-                    args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
-                    sendEventToFlutter("CallKeepPerformEndCallAction", args);
-                    break;
-                case ACTION_REJECT_CALL:
-                    args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
-                    sendEventToFlutter("CallKeepPerformRejectCallAction", args);
-                    break;
+            // Defensive programming: validate attributeMap for actions that require it
+            // Some actions like ACTION_CHECK_REACHABILITY and ACTION_AUDIO_SESSION don't need attributeMap
+            boolean requiresAttributeMap = !action.equals(ACTION_CHECK_REACHABILITY) &&
+                                          !action.equals(ACTION_AUDIO_SESSION);
+
+            if (requiresAttributeMap && attributeMap == null) {
+                Log.w(TAG, "VoiceBroadcastReceiver: received intent with null attributeMap for action: " + action);
+                return;
+            }
+
+            try {
+                switch (action) {
+                    case ACTION_END_CALL:
+                        args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
+                        sendEventToFlutter("CallKeepPerformEndCallAction", args);
+                        break;
+                    case ACTION_REJECT_CALL:
+                        args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
+                        sendEventToFlutter("CallKeepPerformRejectCallAction", args);
+                        break;
                 case ACTION_ANSWER_CALL:
                     args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
                     args.putString("handle", (String) attributeMap.get(EXTRA_CALL_NUMBER));
@@ -929,7 +952,14 @@ public class CallKeepModule {
                     sendEventToFlutter("CallKeepDidPerformDTMFAction", args);
                     break;
                 case ACTION_AUDIO_CALL:
-                    args.putInt("audioRoute", (Integer) attributeMap.get("audioRoute"));
+                    // Null-safe handling for audioRoute Integer value
+                    Object audioRouteObj = attributeMap.get("audioRoute");
+                    if (audioRouteObj instanceof Integer) {
+                        args.putInt("audioRoute", (Integer) audioRouteObj);
+                    } else {
+                        Log.w(TAG, "VoiceBroadcastReceiver: audioRoute is not an Integer, got: " + audioRouteObj);
+                        args.putInt("audioRoute", 0); // Default value
+                    }
                     args.putString("audioRouteName", (String) attributeMap.get("audioRouteName"));
                     args.putString("callUUID", (String) attributeMap.get(EXTRA_CALL_UUID));
                     sendEventToFlutter("CallKeepDidChangeAudioAction", args);
@@ -953,6 +983,16 @@ public class CallKeepModule {
                         CallKeepBackgroundMessagingService.acquireWakeLockNow(CallKeepModule.this.context);
                     }
                     break;
+            }
+            } catch (NullPointerException e) {
+                // Defensive programming: catch NPE from null values in attributeMap
+                Log.e(TAG, "VoiceBroadcastReceiver: NPE while processing action: " + action, e);
+            } catch (ClassCastException e) {
+                // Defensive programming: catch ClassCastException from invalid data types
+                Log.e(TAG, "VoiceBroadcastReceiver: ClassCastException while processing action: " + action, e);
+            } catch (Exception e) {
+                // Defensive programming: catch any other unexpected exceptions
+                Log.e(TAG, "VoiceBroadcastReceiver: Unexpected exception while processing action: " + action, e);
             }
         }
     }
