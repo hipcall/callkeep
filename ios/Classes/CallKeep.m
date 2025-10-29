@@ -30,6 +30,7 @@
 static CXProvider* sharedProvider;
 static NSDictionary *settings;
 static NSObject<CallKeepPushDelegate>* _delegate;
+static PKPushRegistry* sharedVoipRegistry;
 
 - (instancetype)init
 {
@@ -192,9 +193,19 @@ static NSObject<CallKeepPushDelegate>* _delegate;
 
 -(void)voipRegistration
 {
-    PKPushRegistry* voipRegistry = [[PKPushRegistry alloc] initWithQueue:dispatch_get_main_queue()];
-    voipRegistry.delegate = self;
-    voipRegistry.desiredPushTypes = [NSSet setWithObject:PKPushTypeVoIP];
+    // Only create PKPushRegistry once to prevent multiple instances
+    if (sharedVoipRegistry == nil) {
+        sharedVoipRegistry = [[PKPushRegistry alloc] initWithQueue:dispatch_get_main_queue()];
+        sharedVoipRegistry.delegate = self;
+        sharedVoipRegistry.desiredPushTypes = [NSSet setWithObject:PKPushTypeVoIP];
+#ifdef DEBUG
+        NSLog(@"[CallKeep][voipRegistration] Created and configured PKPushRegistry");
+#endif
+    } else {
+#ifdef DEBUG
+        NSLog(@"[CallKeep][voipRegistration] PKPushRegistry already exists, skipping creation");
+#endif
+    }
 }
 
 - (void)pushRegistry:(PKPushRegistry *)registry didUpdatePushCredentials:(PKPushCredentials *)pushCredentials forType:(PKPushType)type {
@@ -644,6 +655,36 @@ static NSObject<CallKeepPushDelegate>* _delegate;
     
     [sharedProvider reportNewIncomingCallWithUUID:uuid update:callUpdate completion:^(NSError * _Nullable error) {
         CallKeep *callKeep = [CallKeep allocWithZone: nil];
+
+        if (error != nil) {
+            NSLog(@"[CallKeep][reportNewIncomingCall] ERROR: Failed to report call to CallKit: %@", error.localizedDescription);
+            NSLog(@"[CallKeep][reportNewIncomingCall] Error code: %ld, domain: %@", (long)error.code, error.domain);
+
+            // For PushKit calls, we must still call the completion handler even on error
+            // to prevent iOS from killing the app for not handling the push.
+            // However, we need to clean up and report the error to the app.
+            if (completion != nil && fromPushKit) {
+                NSLog(@"[CallKeep][reportNewIncomingCall] Calling PushKit completion handler despite error");
+                completion();
+            }
+        } else {
+#ifdef DEBUG
+            NSLog(@"[CallKeep][reportNewIncomingCall] Successfully reported call %@ to CallKit", uuidString);
+#endif
+            // Workaround per https://forums.developer.apple.com/message/169511
+            if ([callKeep lessThanIos10_2]) {
+                [callKeep configureAudioSession];
+            }
+
+            // For non-PushKit calls or successful PushKit calls, call completion handler
+            if (completion != nil && !fromPushKit) {
+                completion();
+            } else if (completion != nil && fromPushKit) {
+                completion();
+            }
+        }
+
+        // Always send the event to Flutter, including error information
         [callKeep sendEventWithNameWrapper:CallKeepDidDisplayIncomingCall body:@{
             @"error": error && error.localizedDescription ? error.localizedDescription : @"",
             @"callUUID": uuidString,
@@ -653,15 +694,6 @@ static NSObject<CallKeepPushDelegate>* _delegate;
             @"fromPushKit": @(fromPushKit),
             @"additionalData": payload ? payload : @"",
         }];
-        if (error == nil) {
-            // Workaround per https://forums.developer.apple.com/message/169511
-            if ([callKeep lessThanIos10_2]) {
-                [callKeep configureAudioSession];
-            }
-        }
-        if (completion != nil) {
-            completion();
-        }
     }];
 }
 
