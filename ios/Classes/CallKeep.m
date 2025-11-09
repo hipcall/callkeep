@@ -7,6 +7,7 @@
 //
 #import <objc/runtime.h>
 #import <AVFoundation/AVFoundation.h>
+#import <arpa/inet.h>
 
 #import "CallKeep.h"
 
@@ -74,7 +75,7 @@ static PKPushRegistry* sharedVoipRegistry;
     } else if ([@"displayIncomingCall" isEqualToString:method]) {
         [self displayIncomingCall:argsMap[@"uuid"] handle:argsMap[@"handle"] handleType:argsMap[@"handleType"] hasVideo:[argsMap[@"hasVideo"] boolValue] callerName:argsMap[@"callerName"] payload:argsMap[@"additionalData"]];
         result(nil);
-    } else if ([@ "startCall" isEqualToString:method]) {
+    } else if ([@"startCall" isEqualToString:method]) {
         [self startCall:argsMap[@"uuid"] handle:argsMap[@"handle"] callerName:argsMap[@"callerName"] handleType:argsMap[@"handleType"] video:[argsMap[@"hasVideo"] boolValue]];
         result(nil);
     } else if ([@"isCallActive" isEqualToString:method]) {
@@ -90,29 +91,31 @@ static PKPushRegistry* sharedVoipRegistry;
     } else if ([@"endAllCalls" isEqualToString:method]) {
         [self endAllCalls];
         result(nil);
-    } else if ([@ "setOnHold" isEqualToString:method]) {
+    } else if ([@"setOnHold" isEqualToString:method]) {
         [self setOnHold:argsMap[@"uuid"] shouldHold:[argsMap[@"hold"] boolValue]];
         result(nil);
-    } else if ([@ "reportEndCallWithUUID" isEqualToString:method]) {
+    } else if ([@"reportEndCallWithUUID" isEqualToString:method]) {
         [self reportEndCallWithUUID:argsMap[@"uuid"] reason:[argsMap[@"reason"] intValue]];
         result(nil);
     } else if ([@"setMutedCall" isEqualToString:method]) {
         [self setMutedCall:argsMap[@"uuid"] muted:[argsMap[@"muted"] boolValue]];
         result(nil);
-    } else if ([@ "sendDTMF" isEqualToString:method]) {
+    } else if ([@"sendDTMF" isEqualToString:method]) {
         [self sendDTMF:argsMap[@"uuid"] dtmf:argsMap[@"key"]];
         result(nil);
-    } else if ([@ "updateDisplay" isEqualToString:method]) {
+    } else if ([@"updateDisplay" isEqualToString:method]) {
         [self updateDisplay:argsMap[@"uuid"] callerName:argsMap[@"callerName"] uri:argsMap[@"handle"]];
         result(nil);
-    } else if([@ "checkIfBusy" isEqualToString:method]){
+    } else if([@"checkIfBusy" isEqualToString:method]){
         [self checkIfBusyWithResult:result];
-    } else if([@ "checkSpeaker" isEqualToString:method]){
+    } else if([@"checkSpeaker" isEqualToString:method]){
         [self checkSpeakerResult:result];
     } else if ([@"reportConnectingOutgoingCallWithUUID" isEqualToString:method]) {
         [self reportConnectingOutgoingCallWithUUID:argsMap[@"uuid"]];
+        result(nil);
     } else if ([@"reportConnectedOutgoingCallWithUUID" isEqualToString:method]) {
         [self reportConnectedOutgoingCallWithUUID:argsMap[@"uuid"]];
+        result(nil);
     } else if([@"reportUpdatedCall" isEqualToString:method]){
         [self reportUpdatedCall:argsMap[@"uuid"] contactIdentifier:argsMap[@"callerName"]];
         result(nil);
@@ -214,9 +217,11 @@ static PKPushRegistry* sharedVoipRegistry;
                           ntohl(tokenBytes[0]), ntohl(tokenBytes[1]), ntohl(tokenBytes[2]),
                           ntohl(tokenBytes[3]), ntohl(tokenBytes[4]), ntohl(tokenBytes[5]),
                           ntohl(tokenBytes[6]), ntohl(tokenBytes[7])];
-    
+
+#ifdef DEBUG
     NSLog(@"\n[VoIP Token]: %@\n\n",hexToken);
-    
+#endif
+
     [self sendEventWithNameWrapper:CallKeepPushKitToken body:@{ @"token": hexToken }];
 }
 
@@ -245,17 +250,17 @@ static PKPushRegistry* sharedVoipRegistry;
      */
 
     NSDictionary *dic = payload.dictionaryPayload;
-    
+
     if (_delegate) {
         dic = [_delegate mapPushPayload:dic];
     }
-    
+
+    // CRITICAL: iOS requires ALL VoIP pushes to report a CallKit call, even invalid ones
+    // If we don't report, iOS will terminate the app with a watchdog exception
+    BOOL isInvalidPayload = NO;
     if (!dic || dic[@"aps"] != nil) {
-        NSLog(@"[CallKeep][VoIP Push] ❌ Invalid payload format (contains 'aps'). Do not use alert format for VoIP push type %@.", payload.type);
-        if(completion != nil) {
-            completion();
-        }
-        return;
+        NSLog(@"[CallKeep][VoIP Push] ⚠️  Invalid payload format (contains 'aps' or nil). Will report and immediately end call to satisfy iOS requirements.");
+        isInvalidPayload = YES;
     }
 
     NSString *uuid = dic[@"uuid"];
@@ -264,6 +269,20 @@ static PKPushRegistry* sharedVoipRegistry;
     BOOL hasVideo = [dic[@"has_video"] boolValue];
     NSString *callerIdType = dic[@"caller_id_type"];
     NSString *stage = dic[@"stage"];
+
+    // If invalid payload, generate placeholder values to report CallKit
+    if (isInvalidPayload) {
+        if (uuid == nil) {
+            uuid = [self createUUID];
+        }
+        if (callerId == nil) {
+            callerId = @"Unknown";
+        }
+        if (callerIdType == nil) {
+            callerIdType = @"number";
+        }
+        NSLog(@"[CallKeep][VoIP Push] Using placeholder values for invalid payload: UUID=%@, caller=%@", uuid, callerId);
+    }
 
     // Handle end_call as either boolean or integer (1/0)
     BOOL endCall = NO;
@@ -303,7 +322,31 @@ static PKPushRegistry* sharedVoipRegistry;
         return;
     }
 
-    // Handle call initialization (default behavior)
+    // CRITICAL: For invalid payloads, report call and immediately end it
+    // This satisfies iOS requirement without showing a call to the user
+    if (isInvalidPayload) {
+        NSLog(@"[CallKeep][VoIP Push] 📞 Reporting then immediately ending call for invalid payload UUID: %@", uuid);
+        [CallKeep reportNewIncomingCall:uuid
+                                 handle:callerId
+                             handleType:callerIdType
+                               hasVideo:NO
+                             callerName:@"Invalid Call"
+                            fromPushKit:YES
+                                payload:nil
+                  withCompletionHandler:^{
+                      NSLog(@"[CallKeep][VoIP Push] ✅ Reported invalid payload call, now ending it immediately");
+                      // Immediately end the call to prevent showing it to user
+                      dispatch_async(dispatch_get_main_queue(), ^{
+                          [CallKeep endCallWithUUID:uuid reason:1]; // reason 1 = CXCallEndedReasonFailed
+                      });
+                      if (completion != nil) {
+                          completion();
+                      }
+                  }];
+        return;
+    }
+
+    // Handle call initialization (default behavior for valid payloads)
     // CRITICAL: This MUST be called within 1 second of receiving the push or iOS kills the app
     NSLog(@"[CallKeep][VoIP Push] 📞 Reporting new incoming call to CallKit for UUID: %@", uuid);
     [CallKeep reportNewIncomingCall:uuid
@@ -353,8 +396,10 @@ static PKPushRegistry* sharedVoipRegistry;
 #ifdef DEBUG
     NSLog(@"[CallKeep][checkSpeaker]");
 #endif
-    NSString *output = [AVAudioSession sharedInstance].currentRoute.outputs.count > 0 ? [AVAudioSession sharedInstance].currentRoute.outputs[0].portType : nil;
-    result(@([output isEqualToString:@"Speaker"]));
+    NSString *output = AVAudioSession.sharedInstance.currentRoute.outputs.count > 0
+        ? AVAudioSession.sharedInstance.currentRoute.outputs[0].portType
+        : nil;
+    result(@([output isEqualToString:AVAudioSessionPortBuiltInSpeaker]));
 }
 
 #pragma mark - CXCallController call actions
