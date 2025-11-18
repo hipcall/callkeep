@@ -228,11 +228,22 @@ static PKPushRegistry* sharedVoipRegistry;
 }
 
 
-- (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(PKPushType)type withCompletionHandler:(nonnull void (^)(void))completion {
+-(void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(PKPushType)type withCompletionHandler:(nonnull void (^)(void))completion {
     // CRITICAL: Track timing to ensure we report call within 1 second (Apple requirement)
     NSDate *pushReceivedTime = [NSDate date];
     NSLog(@"[CallKeep][VoIP Push] ⏱️  Push received at: %@", pushReceivedTime);
     NSLog(@"[CallKeep][VoIP Push] Payload type: %@", payload.type);
+
+    __block BOOL pushCompletionCalled = NO;
+    void (^callPushCompletionIfNeeded)(NSString *) = ^(NSString *context) {
+        if (completion == nil || pushCompletionCalled) {
+            return;
+        }
+        pushCompletionCalled = YES;
+        NSTimeInterval completionDelay = [[NSDate date] timeIntervalSinceDate:pushReceivedTime];
+        NSLog(@"[CallKeep][VoIP Push] ⏱️  Completion handler invoked (%@) after %.3f seconds", context, completionDelay);
+        completion();
+    };
 
     /* payload example.
      {
@@ -252,9 +263,7 @@ static PKPushRegistry* sharedVoipRegistry;
     
     if (!dic || dic[@"aps"] != nil) {
         NSLog(@"[CallKeep][VoIP Push] ❌ Invalid payload format (contains 'aps'). Do not use alert format for VoIP push type %@.", payload.type);
-        if(completion != nil) {
-            completion();
-        }
+        callPushCompletionIfNeeded(@"invalid_payload");
         return;
     }
 
@@ -297,9 +306,7 @@ static PKPushRegistry* sharedVoipRegistry;
         NSLog(@"[CallKeep][VoIP Push] 🔚 Call cancelled via push notification for UUID: %@", uuid);
         // End the call if it exists
         [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
-        if(completion != nil) {
-            completion();
-        }
+        callPushCompletionIfNeeded(@"call_cancelled");
         return;
     }
 
@@ -327,10 +334,11 @@ static PKPushRegistry* sharedVoipRegistry;
                       NSLog(@"[CallKeep][VoIP Push] ✅ Within safe timing limits (%.3f s)", totalDelay);
                   }
 
-                  if (completion != nil) {
-                      completion();
-                  }
+                  callPushCompletionIfNeeded(@"callkit_completion");
               }];
+
+    // Ensure PushKit completion is notified immediately after we've reported the call.
+    callPushCompletionIfNeeded(@"report_new_call_dispatched");
 }
 
 - (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayload:(PKPushPayload *)payload forType:(NSString *)type {
