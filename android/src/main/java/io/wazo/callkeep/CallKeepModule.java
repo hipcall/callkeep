@@ -120,6 +120,7 @@ public class CallKeepModule {
             break;
             case "displayIncomingCall": {
                 displayIncomingCallImpl(
+                        getAppContext(),
                         call.argument("uuid"),
                         call.argument("handle"),
                         call.argument("callerName"),
@@ -322,16 +323,24 @@ public class CallKeepModule {
                                            String callerName,
                                            Map<String, String> additionalData) {
         if (setupImpl(context, getSettings(context))) {
-            displayIncomingCallImpl(uuid, handle, callerName, additionalData);
+            displayIncomingCallImpl(context, uuid, handle, callerName, additionalData);
         }
     }
 
-    private static void displayIncomingCallImpl(String uuid,
+    private static void displayIncomingCallImpl(Context context,
+                                               String uuid,
                                                String handle,
                                                String callerName,
                                                Map<String, String> additionalData) {
         Log.d(TAG, "Called displayIncomingCall");
         if (!isConnectionServiceAvailable() || !hasPhoneAccount()) {
+            // SPIKE ONLY — Telecom calling account unavailable (e.g. ColorOS), where
+            // addNewIncomingCall would silently no-op. Fall back to a full-screen-intent
+            // notification so the call can still be shown. Remove with the FSI spike.
+            Log.d(TAG, "[FsiSpike] No ConnectionService/phone account — posting full-screen-intent fallback");
+            if (context != null) {
+                FsiSpikeNotifier.post(context, uuid, callerName, handle);
+            }
             return;
         }
 
@@ -407,6 +416,7 @@ public class CallKeepModule {
 
     private void endCall(String uuid) {
         Log.d(TAG, "endCall called");
+        FsiSpikeNotifier.cancel(getAppContext()); // SPIKE ONLY — dismiss FSI fallback if shown
         if (!isConnectionServiceAvailable() || !hasPhoneAccount()) {
             return;
         }
@@ -495,12 +505,24 @@ public class CallKeepModule {
 
 
     private void reportEndCallWithUUID(String uuid, Integer reason, Boolean notify) {
+        FsiSpikeNotifier.cancel(getAppContext()); // SPIKE ONLY — dismiss FSI fallback if shown
         if (!isConnectionServiceAvailable() || !hasPhoneAccount()) {
             return;
         }
 
         VoiceConnection conn = VoiceConnectionService.getConnection(uuid);
         if (conn == null) {
+            // The keyed connection wasn't found. On some OEM/MIUI lifecycles the
+            // Telecom connection is registered/replaced under a different key (or our
+            // map dropped it), so a remote cancel that resolved a UUID still no-ops
+            // here and the on-screen incoming call keeps ringing. Best-effort
+            // recovery: disconnect any still-RINGING connection so the phantom UI
+            // can't linger. RINGING-only, so a concurrently answered/active call is
+            // never torn down.
+            Log.w(TAG, "reportEndCallWithUUID: no connection for " + uuid
+                    + " — disconnecting stale ringing connection(s) as fallback");
+            VoiceConnectionService.endRingingConnections(
+                    reason != null ? reason : 6, Boolean.TRUE.equals(notify));
             return;
         }
         conn.reportDisconnect(reason, Boolean.TRUE.equals(notify));

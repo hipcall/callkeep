@@ -116,6 +116,8 @@ static PKPushRegistry* sharedVoipRegistry;
     } else if([@"reportUpdatedCall" isEqualToString:method]){
         [self reportUpdatedCall:argsMap[@"uuid"] contactIdentifier:argsMap[@"callerName"]];
         result(nil);
+    } else if ([@"getVoipPushToken" isEqualToString:method]) {
+        result([self getVoipPushToken]);
     } else {
         return NO;
     }
@@ -208,6 +210,45 @@ static PKPushRegistry* sharedVoipRegistry;
     }
 }
 
+/// Get VoIP push token directly from PKPushRegistry (if available)
+/// This is useful when the CallKeepPushKitToken event was missed due to race conditions
+- (NSString *)getVoipPushToken {
+    if (sharedVoipRegistry == nil) {
+#ifdef DEBUG
+        NSLog(@"[CallKeep][getVoipPushToken] PKPushRegistry not initialized");
+#endif
+        return nil;
+    }
+
+    NSData *tokenData = [sharedVoipRegistry pushTokenForType:PKPushTypeVoIP];
+    if (tokenData == nil) {
+#ifdef DEBUG
+        NSLog(@"[CallKeep][getVoipPushToken] No token available from PKPushRegistry");
+#endif
+        return nil;
+    }
+
+    // Validate token length (PushKit tokens are 32 bytes)
+    if (tokenData.length != 32) {
+#ifdef DEBUG
+        NSLog(@"[CallKeep][getVoipPushToken] Unexpected token length: %lu", (unsigned long)tokenData.length);
+#endif
+        return nil;
+    }
+
+    const unsigned *tokenBytes = [tokenData bytes];
+    NSString *hexToken = [NSString stringWithFormat:@"%08x%08x%08x%08x%08x%08x%08x%08x",
+                          ntohl(tokenBytes[0]), ntohl(tokenBytes[1]), ntohl(tokenBytes[2]),
+                          ntohl(tokenBytes[3]), ntohl(tokenBytes[4]), ntohl(tokenBytes[5]),
+                          ntohl(tokenBytes[6]), ntohl(tokenBytes[7])];
+
+#ifdef DEBUG
+    NSLog(@"[CallKeep][getVoipPushToken] Retrieved token: %@", hexToken);
+#endif
+
+    return hexToken;
+}
+
 - (void)pushRegistry:(PKPushRegistry *)registry didUpdatePushCredentials:(PKPushCredentials *)pushCredentials forType:(PKPushType)type {
     const unsigned *tokenBytes = [pushCredentials.token bytes];
     NSString *hexToken = [NSString stringWithFormat:@"%08x%08x%08x%08x%08x%08x%08x%08x",
@@ -263,7 +304,20 @@ static PKPushRegistry* sharedVoipRegistry;
     
     if (!dic || dic[@"aps"] != nil) {
         NSLog(@"[CallKeep][VoIP Push] ❌ Invalid payload format (contains 'aps'). Do not use alert format for VoIP push type %@.", payload.type);
-        callPushCompletionIfNeeded(@"invalid_payload");
+        // CRITICAL: iOS requires reportNewIncomingCall for every VoIP push.
+        // Report a dummy call and immediately end it to prevent iOS from killing the app.
+        NSString *dummyUuid = [self createUUID];
+        [CallKeep reportNewIncomingCall:dummyUuid
+                                 handle:@""
+                             handleType:@"number"
+                               hasVideo:NO
+                             callerName:@""
+                            fromPushKit:YES
+                                payload:nil
+                  withCompletionHandler:^{
+                      [CallKeep endCallWithUUID:dummyUuid reason:2];
+                      callPushCompletionIfNeeded(@"invalid_payload");
+                  }];
         return;
     }
 
@@ -304,9 +358,21 @@ static PKPushRegistry* sharedVoipRegistry;
     // Handle call cancellation - support both "end_call" and "stage" formats
     if (endCall || (stage && [stage isEqualToString:@"cancel"])) {
         NSLog(@"[CallKeep][VoIP Push] 🔚 Call cancelled via push notification for UUID: %@", uuid);
-        // End the call if it exists
-        [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
-        callPushCompletionIfNeeded(@"call_cancelled");
+        // CRITICAL: iOS requires reportNewIncomingCall for every VoIP push.
+        // Report the incoming call to CallKit first, then immediately end it.
+        // Without this, iOS kills the app with:
+        // "Killing app because it never posted an incoming call to the system after receiving a PushKit VoIP push."
+        [CallKeep reportNewIncomingCall:uuid
+                                 handle:callerId ?: @""
+                             handleType:callerIdType ?: @"number"
+                               hasVideo:hasVideo
+                             callerName:callerName ?: @""
+                            fromPushKit:YES
+                                payload:dic
+                  withCompletionHandler:^{
+                      [CallKeep endCallWithUUID:uuid reason:2]; // reason 2 = CXCallEndedReasonRemoteEnded
+                      callPushCompletionIfNeeded(@"call_cancelled");
+                  }];
         return;
     }
 
@@ -801,20 +867,24 @@ static PKPushRegistry* sharedVoipRegistry;
 - (void)configureAudioSession
 {
 #ifdef DEBUG
-    NSLog(@"[CallKeep][configureAudioSession] Activating audio session");
+    NSLog(@"[CallKeep][configureAudioSession] Configuring audio session");
 #endif
-    
+
     AVAudioSession* audioSession = [AVAudioSession sharedInstance];
     [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord withOptions:AVAudioSessionCategoryOptionAllowBluetooth error:nil];
-    
+
     [audioSession setMode:AVAudioSessionModeVoiceChat error:nil];
-    
+
     double sampleRate = 44100.0;
     [audioSession setPreferredSampleRate:sampleRate error:nil];
-    
+
     NSTimeInterval bufferDuration = .005;
     [audioSession setPreferredIOBufferDuration:bufferDuration error:nil];
-    [audioSession setActive:TRUE error:nil];
+    // Do NOT call [audioSession setActive:TRUE] here.
+    // CallKit manages audio session activation/deactivation via
+    // provider:didActivateAudioSession: and provider:didDeactivateAudioSession:.
+    // Calling setActive synchronously on the main thread causes an App Hang
+    // because it triggers a blocking XPC call to the system audio daemon.
 }
 
 + (BOOL)application:(UIApplication *)application

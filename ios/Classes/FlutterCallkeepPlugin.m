@@ -33,7 +33,7 @@ static id _instance;
                       messenger:(NSObject<FlutterBinaryMessenger>*)messenger
                  viewController:(UIViewController *)viewController
                    withTextures:(NSObject<FlutterTextureRegistry> *)textures {
-    
+
 #ifdef DEBUG
     NSLog(@"[FlutterCallkeepPlugin][init]");
 #endif
@@ -42,6 +42,16 @@ static id _instance;
         _callKeep.eventChannel = [FlutterMethodChannel
                                   methodChannelWithName:@"FlutterCallKeep.Event"
                                   binaryMessenger:[registrar messenger]];
+
+        // CRITICAL: Register for VoIP pushes immediately during plugin init.
+        // This runs synchronously inside didFinishLaunchingWithOptions, ensuring
+        // the PKPushRegistry delegate is ready BEFORE iOS delivers any pending
+        // VoIP push. Without this, the app is killed with:
+        // "Killing app because it never posted an incoming call to the system
+        //  after receiving a PushKit VoIP push."
+        // The CXProvider settings are read from NSUserDefaults (saved from a
+        // previous setup: call), so reportNewIncomingCall works without Flutter.
+        [_callKeep voipRegistration];
     }
     return self;
 }

@@ -104,13 +104,11 @@ public class VoiceConnection extends Connection {
     }
 
     public void setAudio(Integer audioRoute) {
-        CallAudioState currentAudioState = getCurrentAudioState();
-        CallAudioState newAudioState = new CallAudioState(
-                currentAudioState.isMuted(),
-                audioRoute,
-                currentAudioState.getSupportedRouteMask()
-        );
-        onCallAudioStateChanged(newAudioState);
+        // Use the Telecom framework API to actually change the audio route.
+        // Previously this only constructed a CallAudioState and called
+        // onCallAudioStateChanged() which is a notification callback — it
+        // does not instruct the system to switch routes.
+        setAudioRoute(audioRoute);
     }
 
     @Override

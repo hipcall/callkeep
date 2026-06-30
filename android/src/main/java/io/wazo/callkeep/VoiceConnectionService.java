@@ -119,6 +119,21 @@ public class VoiceConnectionService extends ConnectionService {
         }
     }
 
+    // Disconnect any connection that is still RINGING (incoming, not yet answered).
+    // Last-resort recovery for a remote cancel that can't resolve its specific
+    // connection by UUID — e.g. an OEM/MIUI lifecycle quirk registered/replaced the
+    // connection under a different key — which would otherwise leave a phantom
+    // incoming-call UI ringing. Restricted to STATE_RINGING so a concurrently
+    // answered/active call is never torn down.
+    public static void endRingingConnections(int reason, boolean notify) {
+        Map<String, VoiceConnection> connectionMap = new HashMap<>(currentConnections);
+        for (VoiceConnection connection : connectionMap.values()) {
+            if (connection != null && connection.getState() == Connection.STATE_RINGING) {
+                connection.reportDisconnect(reason, notify);
+            }
+        }
+    }
+
     public VoiceConnectionService() {
         super();
         Log.e(TAG, "Constructor");
@@ -395,9 +410,16 @@ public class VoiceConnectionService extends ConnectionService {
             notificationId = foregroundSettings.getInt("notificationId");
         }
         
-        // For Android 14+ (API 34+), we need to specify the service type
+        // For Android 14+ (API 34+), we need to specify the service type.
+        // RECORD_AUDIO must be granted at runtime for FOREGROUND_SERVICE_TYPE_MICROPHONE;
+        // if it isn't, fall back to a plain foreground service to avoid a fatal SecurityException.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            try {
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+            } catch (SecurityException e) {
+                Log.w(TAG, "[VoiceConnectionService] RECORD_AUDIO not granted, falling back to foreground service without microphone type", e);
+                startForeground(notificationId, notification);
+            }
         } else {
             startForeground(notificationId, notification);
         }

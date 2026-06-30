@@ -253,6 +253,14 @@ class FlutterCallkeep extends EventManager {
       await _channel.invokeMethod<void>(
           'setMutedCall', <String, dynamic>{'uuid': uuid, 'muted': shouldMute});
 
+  /// Set the audio route for an active call (Android only).
+  /// Route constants: ROUTE_EARPIECE = 1, ROUTE_BLUETOOTH = 2,
+  /// ROUTE_WIRED_HEADSET = 4, ROUTE_SPEAKER = 8.
+  Future<void> setCallAudio(
+          {required String uuid, required int audioRoute}) async =>
+      await _channel.invokeMethod<void>('setCallAudio',
+          <String, dynamic>{'uuid': uuid, 'audioRoute': audioRoute});
+
   Future<void> sendDTMF({required String uuid, required String key}) async =>
       await _channel.invokeMethod<void>(
           'sendDTMF', <String, dynamic>{'uuid': uuid, 'key': key});
@@ -422,6 +430,16 @@ class FlutterCallkeep extends EventManager {
     await _channel.invokeMethod<void>('foregroundService', <String, dynamic>{
       'settings': {'foregroundService': settings}
     });
+  }
+
+  /// Get VoIP push token directly from PKPushRegistry (iOS only)
+  /// This is useful when the CallKeepPushKitToken event was missed due to race conditions
+  /// Returns null on Android or if no token is available
+  Future<String?> getVoipPushToken() async {
+    if (!isIOS) {
+      return null;
+    }
+    return await _channel.invokeMethod<String>('getVoipPushToken');
   }
 
   Future<void> eventListener(MethodCall call) async {

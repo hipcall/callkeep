@@ -37,6 +37,7 @@ static NSString *_Nonnull const CallKeepActionEnd = @"CallKeepActionEnd";
 @property (nonatomic, strong, nullable) FlutterMethodChannel* eventChannel;
 
 - (BOOL)handleMethodCall:(FlutterMethodCall* _Nonnull)call result:(FlutterResult _Nonnull )result;
+- (void)voipRegistration;
 
 + (BOOL)application:(UIApplication * _Nonnull)application
             openURL:(NSURL * _Nonnull)url
